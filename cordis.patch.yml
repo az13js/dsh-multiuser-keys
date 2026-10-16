@@ -1,0 +1,12 @@
+# The bundle's own patch: one Host row. It ships inert — with no mapped
+# provider every credential keeps the Harness default, and the plugin only adds
+# a settings page that says so.
+#
+# An administrator maps providers by overriding this row (same `id`) in the
+# profile patch layer, or by pointing `configFile` at a JSON document. See
+# config.example.yml and README.md.
+- insert:
+    - id: multiuser-keys
+      name: '@local/dsh-multiuser-keys'
+      config:
+        providers: []

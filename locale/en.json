@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Multi-user API keys",
+    "description": "Each browser keeps its own provider API keys, applied to that person's model requests only."
+  }
+}

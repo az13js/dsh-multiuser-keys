@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "多用户 API Key",
+    "description": "每个浏览器保存自己的 provider API Key，只作用于本人的模型请求。"
+  }
+}

@@ -1,0 +1,48 @@
+# Administrator configuration for @local/dsh-multiuser-keys.
+#
+# Two ways to apply it — use either, not both:
+#
+#   A. Paste the row below into the profile patch layer
+#      ($DSH_PROFILE_DIR/cordis.patch.yml, or any later --patch overlay).
+#      An override replaces the row's whole `config`, so this is the complete
+#      configuration of the plugin.
+#
+#   B. Keep this block out of the patch and point `configFile` at a JSON
+#      document instead (handy for a Kubernetes ConfigMap):
+#
+#        - id: multiuser-keys
+#          name: "@local/dsh-multiuser-keys"
+#          config:
+#            configFile: /etc/dsh/multiuser-keys.json
+#
+#      with that document holding the same fields:
+#
+#        { "providers": [ { "provider": "company-gateway", "label": "公司大模型网关" } ] }
+#
+# Reload the browser page after changing the configuration: the provider
+# catalog reaches the page with the boot HTML.
+- id: multiuser-keys
+  name: "@local/dsh-multiuser-keys"
+  config:
+    providers:
+      # `provider` is the LLM route key exactly as it is configured — the key
+      # the Models page shows and the `llm-pi-ai` section spells
+      # (`providers: { <route>: { apiKeyEnv: … } }`).
+      #
+      # `ref` is optional: when the provider's own profile names an `apiKeyEnv`
+      # in the live settings document, the plugin reads that reference from
+      # there. State it explicitly for providers whose credential is named
+      # somewhere the plugin cannot see.
+      - provider: company-gateway
+        label: 公司大模型网关
+        # ref: COMPANY_GATEWAY_API_KEY
+      # - provider: openrouter
+      #   label: OpenRouter（自备额度）
+      #   ref: OPENROUTER_API_KEY
+
+    # Optional tuning.
+    # recentRingWindowMs: 1800000   # last-browser-activity fallback for work
+    #                               # with no session binding (0 disables it)
+    # header: x-dsh-user-keys       # request header one browser's keys ride in
+    # source: browser               # credential source label reported to callers
+    # logResolutions: false         # log every browser-supplied resolution
