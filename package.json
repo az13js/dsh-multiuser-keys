@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-multiuser-keys",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Per-user provider API keys that stay in each user's browser",
+  "description": "Per-user provider API keys that stay in each user's browser; the current speaker pays",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

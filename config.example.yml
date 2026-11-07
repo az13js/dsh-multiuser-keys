@@ -41,8 +41,10 @@
       #   ref: OPENROUTER_API_KEY
 
     # Optional tuning.
-    # recentRingWindowMs: 1800000   # last-browser-activity fallback for work
-    #                               # with no session binding (0 disables it)
     # header: x-dsh-user-keys       # request header one browser's keys ride in
     # source: browser               # credential source label reported to callers
     # logResolutions: false         # log every browser-supplied resolution
+    #
+    # There is no fallback knob on purpose: a mapped provider is per-user, so a
+    # browser that carries no key fails with MISSING_CREDENTIAL instead of
+    # spending the server's or another user's credential.

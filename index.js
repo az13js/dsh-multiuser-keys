@@ -5,29 +5,31 @@
  * their own provider account. The provider profiles on the server name a
  * credential reference (`apiKeyEnv`) that holds no usable key, so every user
  * keeps their own key in their own browser and the harness must resolve a
- * model request with the key of the person who started it.
+ * model request with the key of the person who is talking *right now*.
  *
- * This plugin owns the resolution half of that: it wraps
- * `ctx.credentials.resolve()` and answers, for the references the server
- * administrator mapped, with the key the *calling browser* supplied. Every
- * other reference — and every mapped reference with no browser key in scope —
- * falls through to the untouched provider, which is exactly the harness's
- * default behaviour.
+ * Ownership rule: a conversation belongs to nobody. Whatever browser drove the
+ * most recent activity of a session supplies the key for that session from then
+ * on. If that browser has no key, the mapped reference resolves to nothing and
+ * the provider call fails with `MISSING_CREDENTIAL`; it never falls back to the
+ * server's credential or to another user's key.
  *
  * How a browser's key reaches a model request:
  *
  *   1. The Client half stores keys in `localStorage` and attaches them to
- *      every same-origin `/api` request as one header.
+ *      every same-origin `/api` request as one header — including an empty
+ *      ring, which is the "this browser has no key" signal.
  *   2. `connection/request` (the waterfall that owns every /api request) reads
  *      that header and runs the rest of the request inside an
- *      `AsyncLocalStorage` scope holding the ring.
- *   3. The first session/agent activity inside that request binds the
- *      session — and, through `agent/created`, every agent it later spawns —
- *      to that ring.
+ *      `AsyncLocalStorage` scope holding the ring. A missing or malformed
+ *      header is treated as an empty ring, so a client that predates this
+ *      plugin cannot inherit a previous speaker's key.
+ *   3. Any session/agent activity driven by that request rebinds the session —
+ *      and, through `agent/created`, every agent it later spawns — to that
+ *      ring, overwriting whoever spoke before.
  *   4. `credentials.resolve(ref)` reads the ring from the request scope, else
  *      from the session of the agent that is driving the current model call
- *      (`ctx.agents.currentInitiator()`), else from the most recent browser
- *      activity inside the configured window, else it delegates.
+ *      (`ctx.agents.currentInitiator()`). A mapped reference with no key in
+ *      scope resolves to `undefined`.
  *
  * Keys therefore live in process memory only: nothing is written to disk, and
  * a restart simply means each browser supplies its keys again on its next
@@ -66,11 +68,10 @@ const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** Bound on remembered session bindings; the oldest binding is evicted first. */
 const SESSION_CAPACITY = 512
 
-/** Default window for the last-browser-activity fallback (30 minutes). */
-const DEFAULT_RECENT_WINDOW_MS = 30 * 60 * 1000
-
 /**
  * Decode one ring header into a plain reference-to-key map.
+ * An empty but well-formed ring decodes to `{}`: the browser spoke and had no
+ * key, which is different from "no header at all" only for diagnostics.
  * @param raw - header value, or undefined when the browser sent none.
  * @returns the normalized ring, or null when the header is absent or unusable.
  */
@@ -94,11 +95,18 @@ export function decodeRingHeader(raw) {
 /**
  * Validate an untrusted ring payload.
  * @param value - decoded JSON value.
- * @returns a fresh reference-to-key map, or null when nothing usable is present.
+ * @returns a fresh reference-to-key map (possibly empty), or null when the
+ *   payload is not a ring at all.
  */
 export function normalizeRing(value) {
-  if (value === null || typeof value !== 'object') return null
-  const source = value.keys !== null && typeof value.keys === 'object' ? value.keys : value
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  let source
+  if ('keys' in value) {
+    if (value.keys === null || typeof value.keys !== 'object' || Array.isArray(value.keys)) return null
+    source = value.keys
+  } else {
+    source = value
+  }
   const ring = {}
   let count = 0
   for (const [ref, key] of Object.entries(source)) {
@@ -110,7 +118,7 @@ export function normalizeRing(value) {
     ring[ref] = trimmed
     count += 1
   }
-  return count === 0 ? null : ring
+  return ring
 }
 
 /**
@@ -152,12 +160,10 @@ function resolveConfig(rawConfig) {
       else if (item !== null && typeof item === 'object' && typeof item.provider === 'string' && item.provider.length > 0) providers.push(item)
     }
   }
-  const window = Number(fromFile.recentRingWindowMs ?? inline.recentRingWindowMs)
   return {
     header: typeof (fromFile.header ?? inline.header) === 'string' && (fromFile.header ?? inline.header).length > 0 ? (fromFile.header ?? inline.header) : DEFAULT_HEADER,
     source: typeof (fromFile.source ?? inline.source) === 'string' && (fromFile.source ?? inline.source).length > 0 ? (fromFile.source ?? inline.source) : DEFAULT_SOURCE,
     configFileError: fromFile.__fileError,
-    recentRingWindowMs: Number.isFinite(window) && window >= 0 ? window : DEFAULT_RECENT_WINDOW_MS,
     logResolutions: (fromFile.logResolutions ?? inline.logResolutions) === true,
     providers,
   }
@@ -232,7 +238,10 @@ export function apply(ctx, rawConfig) {
       }
       next.set(ref, { ...entry, ref })
     }
-    mapping = next
+    // Cache only a usable mapping: an empty result usually means the settings
+    // document was not readable yet, and caching it would let mapped providers
+    // slip through to the server credential for the life of the process.
+    if (next.size > 0) mapping = next
     return next
   }
 
@@ -261,15 +270,17 @@ export function apply(ctx, rawConfig) {
     }
   })
 
-  /** Key rings are process-local state: request scope, session binding, last activity. */
+  /** Key rings are process-local state: request scope plus one binding per session. */
   const requestScope = new AsyncLocalStorage()
   const sessionRings = new Map()
-  let recent
 
-  const remember = (keys) => {
-    recent = { keys, at: Date.now() }
-  }
-
+  /**
+   * Bind a session to the ring of the request that just touched it. The new
+   * binding always wins, an empty ring included: the browser that spoke last
+   * is the one whose key pays, even when it has no key at all.
+   * @param id - session/agent identity.
+   * @param keys - the current request's ring.
+   */
   const bindSession = (id, keys) => {
     const previous = sessionRings.get(id)
     if (previous !== undefined && previous.keys === keys) {
@@ -300,9 +311,9 @@ export function apply(ctx, rawConfig) {
     } catch {
       keys = null
     }
-    if (keys === null) return next()
-    remember(keys)
-    return requestScope.run({ keys }, () => next())
+    // Every HTTP request gets a scope, even without a usable header: an
+    // uninstrumented client must not inherit a previous speaker's ring.
+    return requestScope.run({ keys: keys ?? {} }, () => next())
   })
 
   ctx.on('session/event', (session) => {
@@ -320,6 +331,12 @@ export function apply(ctx, rawConfig) {
   ctx.on('agent/created', (payload) => {
     const id = payload?.agent?.id
     if (id === undefined || sessionRings.has(id)) return undefined
+    // A session/agent born inside a browser request belongs to that browser.
+    const scope = requestScope.getStore()
+    if (scope !== undefined) {
+      bindSession(id, scope.keys)
+      return undefined
+    }
     const parent = currentAgent()
     if (parent === undefined || parent.id === id) return undefined
     const inherited = sessionRings.get(parent.id)
@@ -339,25 +356,23 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
-   * The browser key for one reference, or undefined to keep the default behaviour.
+   * The browser key for one reference, or undefined when this browser carries none.
+   * No global "last browser" state exists: attribution is the request scope, or
+   * the binding of the session that is currently doing the talking.
    * @param ref - credential reference being resolved.
-   * @returns the key, when a mapped browser supplied one for this request.
+   * @returns the key, when the current speaker supplied one.
    */
   function browserKey(ref) {
     if (typeof ref !== 'string' || ref.length === 0) return undefined
     if (!effectiveMapping().has(ref)) return undefined
 
     const scope = requestScope.getStore()
-    if (scope !== undefined && scope.keys[ref] !== undefined) return scope.keys[ref]
+    if (scope !== undefined) return scope.keys[ref]
 
     const agent = currentAgent()
     if (agent !== undefined) {
       const bound = sessionRings.get(agent.id)
-      if (bound !== undefined && bound.keys[ref] !== undefined) return bound.keys[ref]
-    }
-
-    if (recent !== undefined && config.recentRingWindowMs > 0 && Date.now() - recent.at <= config.recentRingWindowMs) {
-      if (recent.keys[ref] !== undefined) return recent.keys[ref]
+      if (bound !== undefined) return bound.keys[ref]
     }
 
     return undefined
@@ -376,6 +391,14 @@ export function apply(ctx, rawConfig) {
       return
     }
     const patched = function resolve(ref) {
+      let mapped = false
+      try {
+        mapped = effectiveMapping().has(String(ref))
+      } catch {
+        mapped = false
+      }
+      if (!mapped) return original.call(this, ref)
+
       let key
       try {
         key = browserKey(ref)
@@ -384,10 +407,14 @@ export function apply(ctx, rawConfig) {
         logger?.warn?.(`multiuser-keys: key lookup failed for ${String(ref)} (${error instanceof Error ? error.message : String(error)})`)
       }
       if (typeof key === 'string' && key.length > 0) {
-        if (config.logResolutions) logger?.info?.(`multiuser-keys: resolved ${String(ref)} from the calling browser`)
+        if (config.logResolutions) logger?.info?.(`multiuser-keys: resolved ${String(ref)} from the current speaker`)
         return Promise.resolve({ value: key, source: config.source })
       }
-      return original.call(this, ref)
+      // Fail closed: the mapped provider is per-user by definition, so an
+      // absent browser key must surface as MISSING_CREDENTIAL instead of
+      // silently spending the server's or another user's quota.
+      if (config.logResolutions) logger?.info?.(`multiuser-keys: ${String(ref)} has no key for the current speaker; refusing the server credential`)
+      return Promise.resolve(undefined)
     }
     service.resolve = patched
     credentialCtx.effect(() => () => {

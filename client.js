@@ -6,8 +6,9 @@
  *   - a settings page under Settings where the user stores their own key for
  *     each provider the server administrator mapped;
  *   - a `fetch` wrapper that attaches those keys to every same-origin `/api`
- *     request, which is how the Host half learns whose key a model request
- *     belongs to.
+ *     request, which is how the Host half learns who is speaking. The header is
+ *     sent even when this browser holds no key: an empty ring is the explicit
+ *     "I have no key, do not spend anyone else's" signal.
  *
  * Keys never leave this browser except on those requests, and they are stored
  * nowhere else: `localStorage` is the only copy. Clearing site data removes
@@ -35,7 +36,7 @@ window.__ModuleLoader__.load({
       nav: '我的 API Key',
       title: '我的 API Key',
       intro:
-        '这些 Key 只保存在当前浏览器里，并随请求发送给服务器内存使用，用于让你以自己的账户额度调用对应的大模型服务。服务器不会把它们写入磁盘，清除浏览器数据后需要重新填写。',
+        '这些 Key 只保存在当前浏览器里，并随请求发送给服务器内存使用。一个对话谁接着聊，就用谁的 Key——不管对话是谁开始的。服务器不会把它们写入磁盘，清除浏览器数据后需要重新填写。',
       emptyCatalog: '服务器管理员还没有配置需要个人 Key 的 provider。',
       footnote:
         '未在服务器配置中的 provider 继续使用服务器默认凭据，无需在此填写。填写后立即生效，无需重启服务。',
@@ -44,7 +45,7 @@ window.__ModuleLoader__.load({
       show: '显示',
       hide: '隐藏',
       saved: '已保存，后续请求生效',
-      cleared: '已清除，将回退到服务器默认凭据',
+      cleared: '已清除；在你重新填写前，接着聊任何对话都会因缺少 Key 而失败',
       empty: 'Key 不能为空',
       configured: '已配置',
       unconfigured: '未配置',
@@ -55,7 +56,7 @@ window.__ModuleLoader__.load({
       nav: 'My API keys',
       title: 'My API keys',
       intro:
-        'These keys stay in this browser and travel with your requests into server memory, so your own account pays for the models you use. The server never writes them to disk; clearing site data means entering them again.',
+        'These keys stay in this browser and travel with your requests into server memory. Whoever continues a conversation pays for it, no matter who started it. The server never writes them to disk; clearing site data means entering them again.',
       emptyCatalog: 'The server administrator has not mapped any provider to per-user keys yet.',
       footnote:
         'Providers outside the server configuration keep using the server default credential. Changes apply to your next request; no restart is needed.',
@@ -64,7 +65,7 @@ window.__ModuleLoader__.load({
       show: 'Show',
       hide: 'Hide',
       saved: 'Saved — applies to your next request',
-      cleared: 'Cleared — the server default credential applies again',
+      cleared: 'Cleared — until you enter one again, continuing any conversation fails for lack of a key',
       empty: 'The key cannot be empty',
       configured: 'Configured',
       unconfigured: 'Not configured',
@@ -161,6 +162,12 @@ window.__ModuleLoader__.load({
 
     /**
      * Attach this browser's keys to every same-origin API request.
+     *
+     * The header is set unconditionally — with an empty ring when this browser
+     * has no key. That is what lets the Host tell "this speaker has no key"
+     * apart from "this request was not made by a browser at all"; only the
+     * former may hold a binding, and it must not fall back to someone else's
+     * credential.
      * @param catalog - the administrator's catalog.
      * @returns disposer restoring the original fetch.
      */
@@ -177,7 +184,7 @@ window.__ModuleLoader__.load({
             for (const ref of refs) {
               if (typeof stored[ref] === 'string' && stored[ref].length > 0) keys[ref] = stored[ref]
             }
-            if (Object.keys(keys).length > 0) header = encodeRing(keys)
+            header = encodeRing(keys)
           }
         } catch {
           header = null
